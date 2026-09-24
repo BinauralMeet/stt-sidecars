@@ -1,0 +1,31 @@
+[Unit]
+Description=bm STT fallback sidecar (faster-whisper, CPU)
+After=network.target
+
+[Service]
+Type=simple
+User=hase
+Group=hase
+ExecStart=/opt/stt-sidecars/venv/bin/python3 /home/hase/sandhome/bm/stt-sidecars/cpu_whisper_server.py
+Environment=CPU_WHISPER_MODEL=small
+Environment=CPU_WHISPER_THREADS=4
+Environment=CPU_WHISPER_PORT=8190
+Environment=HF_HOME=/opt/stt-sidecars/hf-cache
+Restart=on-failure
+RestartSec=5
+
+# Shared, memory-constrained host (`doc show dev-environment`, `earlyoom`): this is a CPU
+# fallback that should stay a good citizen, not compete with interactive sandbox users.
+Nice=10
+CPUWeight=30
+MemoryMax=2G
+
+# Hardening -- this process only needs to read its own venv/code and talk on localhost.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/stt-sidecars
+
+[Install]
+WantedBy=multi-user.target

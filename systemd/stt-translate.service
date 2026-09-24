@@ -1,0 +1,29 @@
+[Unit]
+Description=bm translation sidecar (CTranslate2 + opus-mt/FuguMT, CPU)
+After=network.target
+
+[Service]
+Type=simple
+User=hase
+Group=hase
+ExecStart=/opt/stt-sidecars/venv/bin/python3 /home/hase/sandhome/bm/stt-sidecars/translate_server.py
+Environment=TRANSLATE_MODELS_DIR=/opt/stt-sidecars/models
+Environment=TRANSLATE_THREADS=4
+Environment=TRANSLATE_PORT=8191
+Restart=on-failure
+RestartSec=5
+
+# Shared, memory-constrained host (`doc show dev-environment`, `earlyoom`): a good-citizen
+# background service, not competing with interactive sandbox users.
+Nice=10
+CPUWeight=30
+MemoryMax=1G
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/stt-sidecars
+
+[Install]
+WantedBy=multi-user.target

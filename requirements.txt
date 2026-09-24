@@ -1,0 +1,11 @@
+faster-whisper
+ctranslate2
+sentencepiece
+huggingface_hub
+flask
+waitress
+
+# Only needed transiently, to convert HF MarianMT checkpoints to CTranslate2 (scripts/convert_models.sh).
+# Not required to run the servers themselves -- fine to uninstall after conversion.
+transformers
+torch
