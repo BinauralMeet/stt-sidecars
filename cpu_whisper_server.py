@@ -21,6 +21,9 @@ from waitress import serve
 MODEL_SIZE = os.environ.get('CPU_WHISPER_MODEL', 'small')
 CPU_THREADS = int(os.environ.get('CPU_WHISPER_THREADS', '4'))
 PORT = int(os.environ.get('CPU_WHISPER_PORT', '8190'))
+#  Vocabulary this deployment keeps getting wrong -- handed to the decoder as context so
+#  loanwords and names stand a chance. Same knob as gpu_whisper_server.py; see its docstring.
+PROMPT = os.environ.get('WHISPER_PROMPT', '')
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('cpu-whisper')
@@ -29,12 +32,17 @@ app = Flask(__name__)
 
 log.info('loading faster-whisper model=%s cpu_threads=%d ...', MODEL_SIZE, CPU_THREADS)
 model = WhisperModel(MODEL_SIZE, device='cpu', compute_type='int8', cpu_threads=CPU_THREADS)
-log.info('model loaded, listening on 127.0.0.1:%d', PORT)
+#  172.17.0.1 is docker0's host-side address, reachable from every sandbox container on this
+#  host (`bm/docs stt-translation#hostwork`). This has no auth, so anything with container access
+#  on this host can reach it -- accepted tradeoff so the dev sandboxes can reach the fallback ASR.
+LISTEN = f'127.0.0.1:{PORT} 172.17.0.1:{PORT}'
+log.info('model loaded, listening on %s', LISTEN)
 
 
 @app.post('/asr')
 def asr():
     lang_hint = (request.args.get('lang') or '').strip().lower() or None
+    prompt = request.args.get('prompt') or PROMPT or None
     audio = request.get_data()
     if not audio:
         return jsonify(text='', lang=lang_hint or ''), 400
@@ -43,6 +51,7 @@ def asr():
         segments, info = model.transcribe(
             io.BytesIO(audio),
             language=lang_hint,
+            initial_prompt=prompt,
             vad_filter=False,  # BM already did VAD upstream; avoid double-guessing endpoints
         )
         text = ''.join(seg.text for seg in segments).strip()
@@ -60,4 +69,4 @@ def health():
 
 
 if __name__ == '__main__':
-    serve(app, host='127.0.0.1', port=PORT, threads=4)
+    serve(app, listen=LISTEN, threads=4)

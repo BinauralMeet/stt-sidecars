@@ -1,0 +1,32 @@
+[Unit]
+Description=bm STT sidecar (faster-whisper large-v3-turbo, GPU)
+After=network.target
+
+[Service]
+Type=simple
+User=hase
+Group=hase
+ExecStart=/opt/stt-sidecars/venv-gpu/bin/python3 /home/hase/sandhome/bm/stt-sidecars/gpu_whisper_server.py
+Environment=WHISPER_MODEL=large-v3-turbo
+Environment=WHISPER_DEVICE=cuda
+Environment=WHISPER_COMPUTE=float16
+Environment=WHISPER_PORT=8192
+Environment=HF_HOME=/opt/stt-sidecars/hf-cache
+#  The words this deployment keeps getting wrong. Short on purpose -- it is decoder context,
+#  so a long list costs latency and starts steering the transcript.
+Environment=WHISPER_PROMPT=バイノーラル, ミュート, スピーカー, マイク, アバター, ブラウザ, シェア, コンテンツ, ルーム, サーバー
+Restart=on-failure
+RestartSec=5
+
+# Unlike the CPU fallback this owns a GPU while it runs, so it is not niced down: the point of
+# it is to answer faster than the speech arrives.
+
+# Hardening -- this process only needs to read its own venv/code and talk on the network.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/stt-sidecars
+
+[Install]
+WantedBy=multi-user.target

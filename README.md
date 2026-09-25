@@ -13,7 +13,8 @@ layout for the same reason: multi-hundred-MB binaries have no business in a git 
 
 | Service | Port | Endpoint | Backing |
 |---|---|---|---|
-| `cpu_whisper_server.py` | 8190 | `POST /asr?lang=<hint>` (body: 16kHz mono s16le WAV) | faster-whisper `small`, CPU int8 |
+| `cpu_whisper_server.py` | 8190 | `POST /asr?lang=<hint>[&prompt=<terms>]` (body: 16kHz mono s16le WAV) | faster-whisper `small`, CPU int8 |
+| `gpu_whisper_server.py` | 8192 | same contract as above | faster-whisper `large-v3-turbo`, CUDA fp16. **Runs on a GPU machine, not this host** — see `#gpu` |
 | `translate_server.py` | 8191 | `POST /translate` `{texts,src,dsts}` | CTranslate2 + FuguMT (`staka/fugumt-{ja-en,en-ja}`), CPU int8 |
 
 ## Setup (once per host)
@@ -50,6 +51,36 @@ curl -X POST http://127.0.0.1:8191/translate -H 'Content-Type: application/json'
 Then in `bmMediasoupServer/config.js`, add to `stt.backends` / set `translation.endpoint`
 (`stt-translation#fallback` has the exact shape) and restart the media/main server.
 
+## Deploying the GPU recognizer {#gpu}
+
+`gpu_whisper_server.py` is the answer to SenseVoice mangling katakana: SenseVoice-small is fast
+but carries no language model and cannot be biased, while Whisper has both and takes an
+`initial_prompt` of the terms a room actually uses (`WHISPER_PROMPT` in the unit file).
+
+It is written to the same contract as the CPU sidecar, so `bmMediasoupServer` needs nothing but
+another entry in `stt.backends` — no `upload`/`langParam`, unlike SenseVoice.
+
+It does **not** run on this host (no GPU here). On the GPU machine:
+
+```sh
+python3 -m venv /opt/stt-sidecars/venv-gpu
+/opt/stt-sidecars/venv-gpu/bin/pip install faster-whisper flask waitress
+#  faster-whisper needs CUDA's cuBLAS and cuDNN present; nvidia-* pip wheels also work.
+WHISPER_MODEL=large-v3-turbo WHISPER_DEVICE=cuda /opt/stt-sidecars/venv-gpu/bin/python3 \
+  /path/to/gpu_whisper_server.py
+```
+
+Two host-side pieces are needed beyond starting it, and neither can be done from a sandbox
+container:
+
+1. **A mode in that machine's `control_api.py`** that starts/stops it, so it takes its turn with
+   the other GPU users the same way `sensevoice` and `hidream` do. `bmMediasoupServer` switches
+   into a mode by name (`gpuMode`), and will not touch a GPU whose lock is held.
+2. **A proxy path** on `lm.haselab.net` (like `/SENSEVOICE`), since the media server reaches that
+   machine only through the proxy.
+
+Until both exist, the entry simply is not added to `stt.backends` and nothing changes.
+
 ## Known limits
 
 - Only `ja<->en`. Adding a language means converting another OPUS-MT-family model
@@ -57,9 +88,15 @@ Then in `bmMediasoupServer/config.js`, add to `stt.backends` / set `translation.
 - `cpu_whisper_server.py` is single-model, single-process (waitress, 4 threads): concurrent
   transcriptions serialize on CPU. Fine for an occasional-fallback role; not meant to carry a
   whole meeting's STT load the way the GPU backend does.
-- Both are plain HTTP on `127.0.0.1`, no auth -- matches `config.js`'s
-  `{kind:'cpuWhisper', endpoint:'http://localhost:8190/asr'}` example, which names no
-  `apiKeyEnv`. Do not bind these to a public interface without adding one.
+- Both are plain HTTP, no auth -- matches `config.js`'s
+  `{kind:'cpuWhisper', endpoint:'http://172.17.0.1:8190/asr'}` example, which names no
+  `apiKeyEnv`. They listen on `127.0.0.1` **and** `172.17.0.1` (docker0's host-side address,
+  see `waitress`'s `listen=` in both servers), so every sandbox container on this host can
+  reach them unauthenticated -- accepted so BM's dev checkout (which runs inside a container,
+  `start-dev.sh`) can reach the fallback chain. `ufw allow in on docker0 to any port 8190/8191
+  proto tcp` bounds this to docker0 traffic only, not the public interface
+  (`bm/docs stt-translation#hostwork`, `CHANGELOG#stt-sidecar-docker0-expose`). Do not bind
+  these to a public interface without adding auth.
 
 ## 設計判断の記録 {#models}
 

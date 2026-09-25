@@ -57,7 +57,11 @@ for (src, dst), name in PAIRS.items():
     model_dir = os.path.join(MODELS_DIR, name)
     log.info('loading %s -> %s from %s ...', src, dst, model_dir)
     pairs[(src, dst)] = Pair(model_dir)
-log.info('%d language pair(s) loaded, listening on 127.0.0.1:%d', len(pairs), PORT)
+#  172.17.0.1 is docker0's host-side address, reachable from every sandbox container on this
+#  host (`bm/docs stt-translation#hostwork`). This has no auth, so anything with container access
+#  on this host can reach it -- accepted tradeoff so the dev sandboxes can reach translation.
+LISTEN = f'127.0.0.1:{PORT} 172.17.0.1:{PORT}'
+log.info('%d language pair(s) loaded, listening on %s', len(pairs), LISTEN)
 
 
 @app.post('/translate')
@@ -89,4 +93,4 @@ def health():
 
 
 if __name__ == '__main__':
-    serve(app, host='127.0.0.1', port=PORT, threads=4)
+    serve(app, listen=LISTEN, threads=4)
