@@ -14,7 +14,8 @@ layout for the same reason: multi-hundred-MB binaries have no business in a git 
 | Service | Port | Endpoint | Backing |
 |---|---|---|---|
 | `cpu_whisper_server.py` | 8190 | `POST /asr?lang=<hint>[&prompt=<terms>]` (body: 16kHz mono s16le WAV) | faster-whisper `small`, CPU int8 |
-| `gpu_whisper_server.py` | 8192 | same contract as above | faster-whisper `large-v3-turbo`, CUDA fp16. **Runs on a GPU machine, not this host** — see `#gpu` |
+| `cpu_whisper_server.py` (2nd instance) | 8190 on **ai4**, reached at `172.17.0.1:8193` here | same contract | faster-whisper `medium`, CPU int8. **Runs on ai4, not this host** — see `#ai4` |
+| `gpu_whisper_server.py` | 8192 | same contract as above, plus `POST /translate` | faster-whisper `large-v3-turbo` + M2M-100 418M, CUDA. **Runs on a GPU machine, not this host** — see `#gpu` |
 | `translate_server.py` | 8191 | `POST /translate` `{texts,src,dsts}` | CTranslate2 + FuguMT (`staka/fugumt-{ja-en,en-ja}`), CPU int8 |
 
 ## Setup (once per host)
@@ -60,6 +61,21 @@ but carries no language model and cannot be biased, while Whisper has both and t
 It is written to the same contract as the CPU sidecar, so `bmMediasoupServer` needs nothing but
 another entry in `stt.backends` — no `upload`/`langParam`, unlike SenseVoice.
 
+The same process also answers `/translate` for the pairs the CPU translator has no model for
+(it carries ja<->en only), with one multilingual model: M2M-100 418M by default, NLLB-200 with
+`MULTI_KIND=nllb`. M2M is the default because NLLB is CC-BY-NC and this deployment is public,
+so the licence would follow the whole service rather than just the model. Convert it once:
+
+```sh
+/opt/stt-sidecars/venv-gpu/bin/pip install transformers sentencepiece
+/opt/stt-sidecars/venv-gpu/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+ct2-transformers-converter --model facebook/m2m100_418M --output_dir <dir> --quantization float16
+/opt/stt-sidecars/venv-gpu/bin/pip uninstall -y torch   # only the conversion needed it
+```
+
+then point `MULTI_MODEL` at `<dir>`. Torch is only for reading the checkpoint, so the CPU wheel
+is the one to install -- the CUDA build is ten times the download for no benefit.
+
 It does **not** run on this host (no GPU here). It is deployed on `rtx5070ti`, under
 `C:\Home\work\gpuwhisper\` with its own venv, and that machine's `control_api.py` owns it as a
 mode alongside `hidream`/`sensevoice`/`irodori`:
@@ -83,6 +99,49 @@ box:
 
 There is no reverse-proxy path to that machine (unlike `/SENSEVOICE`), so the media server
 reaches it through the SSH tunnel `bm/start-dev.sh` opens on 8192.
+
+## Second CPU instance on ai4 {#ai4}
+
+ai1 (this host) runs low on memory under normal dev-sandbox load — `earlyoom` has SIGTERM'd
+a `faster-whisper` load attempt mid-benchmark here. ai2/ai3/ai4 are spare machines with
+identical hardware sitting otherwise idle, so a second, bigger CPU instance runs on ai4 instead
+of adding load here. Same `cpu_whisper_server.py`, unmodified, just a bigger
+`CPU_WHISPER_MODEL` and more `CPU_WHISPER_THREADS` (8, not 4 — matching physical core count;
+using both hyperthreads made it *slower*, measured 2026-09-26 on the i7-11800H in this fleet):
+
+```sh
+# on ai4, same as "Setup" above but skip translate_server.py/models/ entirely -- this instance
+# only ever runs cpu_whisper_server.py
+mkdir -p /opt/stt-sidecars/hf-cache
+python3 -m venv /opt/stt-sidecars/venv
+/opt/stt-sidecars/venv/bin/pip install faster-whisper flask waitress
+# copy cpu_whisper_server.py to /opt/stt-sidecars/, then:
+sudo cp systemd/stt-cpu-whisper-ai4.service /etc/systemd/system/stt-cpu-whisper.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now stt-cpu-whisper
+```
+
+Unlike the ai1 instances, **this one is not exposed on `172.17.0.1` for a ufw docker0 rule to
+open** — ai4 has no devsandbox containers to reach it from, so there is nothing to scope a rule
+to. Instead ai1 reaches it through a permanent, narrowly-scoped SSH tunnel:
+
+- `ai4-stt-tunnel.service` (systemd, on ai1, `Restart=always`): `ssh -N` forwarding
+  `127.0.0.1:8193` and `172.17.0.1:8193` (ai1) to `127.0.0.1:8190` (ai4).
+- The key it uses (`/root/.ssh/id_ed25519_ai4-stt-tunnel` on ai1) can do *only* that: ai4's
+  `hase` account's `authorized_keys` restricts it with
+  `command="/bin/echo restricted: port-forwarding only",restrict,port-forwarding,
+  permitopen="127.0.0.1:8190"`. `restrict,port-forwarding` alone is not enough — it blocks an
+  interactive pty but still lets `ssh host somecommand` run `somecommand` (measured: `ssh ...
+  whoami` went through). The `command=` forces every exec/session request to that harmless
+  echo instead, regardless of what the client asked for; `-N` (pure port-forward, no session at
+  all) is unaffected. `permitopen` also verified: forwarding to a non-listed port locally
+  accepts the TCP connection (that's just the local `ssh -L` listener) but no bytes cross —
+  ai4's sshd refuses to open the channel.
+- `ufw allow in on docker0 to any port 8193 proto tcp` on ai1 (same pattern as 8190/8191)
+  scopes the *local* end of the tunnel to sandbox containers only.
+
+Reproducing this on ai2/ai3 is the same recipe with a fresh dedicated keypair per host (never
+reuse the ai4 one) and the next free local port (8194, ...).
 
 ## Known limits
 
