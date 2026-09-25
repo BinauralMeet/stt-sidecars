@@ -1,0 +1,30 @@
+[Unit]
+Description=bm STT fallback sidecar (faster-whisper medium, CPU) -- dedicated ai4 instance
+After=network.target
+
+[Service]
+Type=simple
+User=hase
+Group=hase
+ExecStart=/opt/stt-sidecars/venv/bin/python3 /opt/stt-sidecars/cpu_whisper_server.py
+Environment=CPU_WHISPER_MODEL=medium
+Environment=CPU_WHISPER_THREADS=8
+Environment=CPU_WHISPER_PORT=8190
+Environment=HF_HOME=/opt/stt-sidecars/hf-cache
+Restart=on-failure
+RestartSec=5
+
+# ai4 is otherwise idle (no devsandbox containers, no other interactive load) unlike ai1's
+# stt-cpu-whisper.service, so no Nice/CPUWeight de-prioritization here. MemoryMax is still a
+# safety net in case ai2/ai3/ai4 ever pick up the vrc.jp media-server role their pre-provisioned
+# ufw mediasoup/TURN port ranges suggest they're meant for.
+MemoryMax=6G
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/stt-sidecars
+
+[Install]
+WantedBy=multi-user.target

@@ -19,6 +19,34 @@ costs latency and starts to steer the transcript itself.
 import io
 import logging
 import os
+import sys
+
+
+def _add_cuda_dll_dirs():
+    """Windows does not search site-packages for DLLs, so CTranslate2 fails with
+    "Library cublas64_12.dll is not found" even when the nvidia-*-cu12 wheels that contain it are
+    installed. Both mechanisms are needed and neither is enough on its own: add_dll_directory()
+    only covers loads that opt into the safe search order, and CTranslate2 loads cuBLAS by plain
+    name, which searches PATH. A no-op everywhere else, where the loader follows RPATH."""
+    if not hasattr(os, 'add_dll_directory'):
+        return
+    import site
+    found = []
+    for base in site.getsitepackages():
+        root = os.path.join(base, 'nvidia')
+        if not os.path.isdir(root):
+            continue
+        for pkg in sorted(os.listdir(root)):
+            for sub in ('bin', 'lib'):
+                path = os.path.join(root, pkg, sub)
+                if os.path.isdir(path):
+                    os.add_dll_directory(path)
+                    found.append(path)
+    if found:
+        os.environ['PATH'] = os.pathsep.join(found) + os.pathsep + os.environ.get('PATH', '')
+
+
+_add_cuda_dll_dirs()
 
 from flask import Flask, request, jsonify
 from faster_whisper import WhisperModel

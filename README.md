@@ -60,26 +60,29 @@ but carries no language model and cannot be biased, while Whisper has both and t
 It is written to the same contract as the CPU sidecar, so `bmMediasoupServer` needs nothing but
 another entry in `stt.backends` — no `upload`/`langParam`, unlike SenseVoice.
 
-It does **not** run on this host (no GPU here). On the GPU machine:
+It does **not** run on this host (no GPU here). It is deployed on `rtx5070ti`, under
+`C:\Home\work\gpuwhisper\` with its own venv, and that machine's `control_api.py` owns it as a
+mode alongside `hidream`/`sensevoice`/`irodori`:
 
 ```sh
-python3 -m venv /opt/stt-sidecars/venv-gpu
-/opt/stt-sidecars/venv-gpu/bin/pip install faster-whisper flask waitress
-#  faster-whisper needs CUDA's cuBLAS and cuDNN present; nvidia-* pip wheels also work.
-WHISPER_MODEL=large-v3-turbo WHISPER_DEVICE=cuda /opt/stt-sidecars/venv-gpu/bin/python3 \
-  /path/to/gpu_whisper_server.py
+curl -X POST http://<rtx5070ti>:8100/activate/gpuwhisper   # stops hidream, starts this
+curl http://<rtx5070ti>:8100/status                        # active_modes
 ```
 
-Two host-side pieces are needed beyond starting it, and neither can be done from a sandbox
-container:
+`control_api.py` passes it `WHISPER_PROMPT` (the katakana vocabulary) and pins it to
+`127.0.0.1`. Two things bit us there and are worth knowing before touching another Windows GPU
+box:
 
-1. **A mode in that machine's `control_api.py`** that starts/stops it, so it takes its turn with
-   the other GPU users the same way `sensevoice` and `hidream` do. `bmMediasoupServer` switches
-   into a mode by name (`gpuMode`), and will not touch a GPU whose lock is held.
-2. **A proxy path** on `lm.haselab.net` (like `/SENSEVOICE`), since the media server reaches that
-   machine only through the proxy.
+- **CTranslate2 cannot find CUDA on Windows by itself.** The `nvidia-*-cu12` wheels put
+  `cublas64_12.dll` under `site-packages/nvidia/*/bin`, which Windows does not search.
+  `os.add_dll_directory()` alone is not enough either -- CTranslate2 loads the library by plain
+  name, which searches `PATH` -- so `gpu_whisper_server.py` does both before importing it.
+- **Pin cuBLAS to the CUDA minor version the GPU stack actually runs.** With the 12.9 wheel the
+  process died mid-inference, taking the whole service with it and leaving the request hanging;
+  `nvidia-cublas-cu12==12.8.*` (matching the machine's torch cu128) is stable.
 
-Until both exist, the entry simply is not added to `stt.backends` and nothing changes.
+There is no reverse-proxy path to that machine (unlike `/SENSEVOICE`), so the media server
+reaches it through the SSH tunnel `bm/start-dev.sh` opens on 8192.
 
 ## Known limits
 
