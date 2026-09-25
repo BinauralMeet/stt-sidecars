@@ -85,9 +85,13 @@ curl -X POST http://<rtx5070ti>:8100/activate/gpuwhisper   # stops hidream, star
 curl http://<rtx5070ti>:8100/status                        # active_modes
 ```
 
-`control_api.py` passes it `WHISPER_PROMPT` (the katakana vocabulary) and pins it to
-`127.0.0.1`. Two things bit us there and are worth knowing before touching another Windows GPU
-box:
+`control_api.py` passes it `WHISPER_PROMPT` (the katakana vocabulary) with
+`WHISPER_PROMPT_LANG=ja`, and exposes it on the LAN so the reverse proxy can publish it. Three
+things bit us there and are worth knowing before touching another Windows GPU box:
+
+- **A prompt is decoder context, not a dictionary lookup.** The Japanese word list handed to an
+  English utterance turned "ask not" into "アースクリーン": Whisper followed the prompt's language.
+  `WHISPER_PROMPT_LANG` keeps it to the language it is written in.
 
 - **CTranslate2 cannot find CUDA on Windows by itself.** The `nvidia-*-cu12` wheels put
   `cublas64_12.dll` under `site-packages/nvidia/*/bin`, which Windows does not search.

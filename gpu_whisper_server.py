@@ -13,7 +13,9 @@ katakana vocabulary of a technical meeting is exactly where it fails. Whisper la
 both, and `initial_prompt` lets the terms a room actually uses be handed to it up front.
 
 `WHISPER_PROMPT` is that vocabulary: a short list of the words this deployment keeps getting
-wrong. Keep it under ~200 characters -- it is prepended to the decoder's context, so a long list
+wrong, and `WHISPER_PROMPT_LANG` the language it is written in -- a prompt is decoder context,
+so a Japanese word list handed to an English utterance drags the transcript into Japanese.
+Keep it under ~200 characters -- it is prepended to the decoder's context, so a long list
 costs latency and starts to steer the transcript itself.
 
 The same process also answers the translation contract, for the language pairs the CPU sidecar
@@ -73,6 +75,10 @@ COMPUTE = os.environ.get('WHISPER_COMPUTE', 'float16')
 PORT = int(os.environ.get('WHISPER_PORT', '8192'))
 HOST = os.environ.get('WHISPER_HOST', '0.0.0.0')
 PROMPT = os.environ.get('WHISPER_PROMPT', '')
+#  A prompt is decoder context, so a Japanese word list pulls an English utterance towards
+#  Japanese: "ask not" came back as "アースクリーン". Naming the prompt's own language keeps it
+#  out of the way of every other one; empty means apply it always, as before.
+PROMPT_LANG = os.environ.get('WHISPER_PROMPT_LANG', '')
 #  Several people talk at once in a meeting, and every one of their utterances lands here. One
 #  model instance answers one request at a time, so without replicas the second speaker simply
 #  waits for the first -- which is the latency people actually notice.
@@ -96,7 +102,9 @@ log.info('model loaded, listening on %s:%d (workers: %d, beam: %d, prompt: %s)',
 @app.post('/asr')
 def asr():
     lang_hint = (request.args.get('lang') or '').strip().lower() or None
-    prompt = request.args.get('prompt') or PROMPT or None
+    prompt = request.args.get('prompt')
+    if not prompt and PROMPT and (not PROMPT_LANG or lang_hint == PROMPT_LANG):
+        prompt = PROMPT
     audio = request.get_data()
     if not audio:
         return jsonify(text='', lang=lang_hint or ''), 400
@@ -191,7 +199,8 @@ def translate():
 
 @app.get('/health')
 def health():
-    return jsonify(status='ok', model=MODEL, device=DEVICE, prompt=bool(PROMPT),
+    return jsonify(status='ok', model=MODEL, device=DEVICE,
+                   prompt=f'{PROMPT_LANG or "all"}' if PROMPT else None,
                    translator=MULTI_KIND if translator is not None else None)
 
 
