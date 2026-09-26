@@ -147,6 +147,28 @@ to. Instead ai1 reaches it through a permanent, narrowly-scoped SSH tunnel:
 Reproducing this on ai2/ai3 is the same recipe with a fresh dedicated keypair per host (never
 reuse the ai4 one) and the next free local port (8194, ...).
 
+## The dedicated ai4 instance {#ai4}
+
+`systemd/stt-cpu-whisper-ai4.service` is a second CPU instance on a host that has nothing else
+to do, so the media servers keep getting subtitles while the GPU is busy with someone else's
+work. It runs `medium` rather than `small` (16 cores, nothing competing for them) and, unlike
+the ai1 instance, is not niced down.
+
+That host has no checkout of this repo: the two files it runs live in `/opt/stt-sidecars/`
+directly, so updating it is a copy rather than a pull:
+
+```sh
+scp cpu_whisper_server.py sidecar_auth.py ai4:/opt/stt-sidecars/
+ssh ai4 sudo systemctl restart stt-cpu-whisper
+```
+
+Both files are needed -- `cpu_whisper_server.py` imports `sidecar_auth`.
+
+Measured there: 11 seconds of speech in 1.9s with `small`; `medium` is slower again, so this
+instance answers after the speaker has finished rather than while they are talking. That is what
+a fallback is for -- interim subtitles switch themselves off when a backend cannot outrun speech
+(see `stt-translation#limits`).
+
 ## Serving another machine {#remote}
 
 Both sidecars listen on loopback (plus docker0) by default, which is the whole of their security
