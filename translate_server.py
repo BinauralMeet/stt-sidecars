@@ -19,6 +19,8 @@ import os
 import ctranslate2
 import sentencepiece as spm
 from flask import Flask, request, jsonify
+
+from sidecar_auth import install as install_auth
 from waitress import serve
 
 MODELS_DIR = os.environ.get('TRANSLATE_MODELS_DIR', '/opt/stt-sidecars/models')
@@ -36,6 +38,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 log = logging.getLogger('translate')
 
 app = Flask(__name__)
+if install_auth(app):
+    log.info('bearer token required (STT_API_KEY is set)')
 
 
 class Pair:
@@ -60,7 +64,7 @@ for (src, dst), name in PAIRS.items():
 #  172.17.0.1 is docker0's host-side address, reachable from every sandbox container on this
 #  host (`bm/docs stt-translation#hostwork`). This has no auth, so anything with container access
 #  on this host can reach it -- accepted tradeoff so the dev sandboxes can reach translation.
-LISTEN = f'127.0.0.1:{PORT} 172.17.0.1:{PORT}'
+LISTEN = os.environ.get('TRANSLATE_LISTEN', f'127.0.0.1:{PORT} 172.17.0.1:{PORT}')
 log.info('%d language pair(s) loaded, listening on %s', len(pairs), LISTEN)
 
 

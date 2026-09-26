@@ -66,6 +66,8 @@ def _add_cuda_dll_dirs():
 _add_cuda_dll_dirs()
 
 from flask import Flask, request, jsonify
+
+from sidecar_auth import install as install_auth
 from faster_whisper import WhisperModel
 from waitress import serve
 
@@ -92,6 +94,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 log = logging.getLogger('gpu-whisper')
 
 app = Flask(__name__)
+if install_auth(app):
+    log.info('bearer token required (STT_API_KEY is set)')
 
 log.info('loading faster-whisper model=%s device=%s compute=%s ...', MODEL, DEVICE, COMPUTE)
 model = WhisperModel(MODEL, device=DEVICE, compute_type=COMPUTE, num_workers=WORKERS)

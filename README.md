@@ -147,6 +147,20 @@ to. Instead ai1 reaches it through a permanent, narrowly-scoped SSH tunnel:
 Reproducing this on ai2/ai3 is the same recipe with a fresh dedicated keypair per host (never
 reuse the ai4 one) and the next free local port (8194, ...).
 
+## Serving another machine {#remote}
+
+Both sidecars listen on loopback (plus docker0) by default, which is the whole of their security
+model: anything that can reach one can spend its CPU and read back what was said. Pointing a
+media server on another host at one means changing both halves of that:
+
+- **`CPU_WHISPER_LISTEN` / `TRANSLATE_LISTEN`** (space-separated `host:port`, as waitress takes
+  it) to add the address that host is reached on.
+- **`STT_API_KEY`** to require `Authorization: Bearer <key>`, which is what bmMediasoupServer
+  already sends when the backend entry names an `apiKeyEnv`. `/health` stays open so probes work.
+
+Neither covers the wire itself: **the audio goes out in plain HTTP**. On a public address, put it
+behind TLS (or restrict it to the media servers by firewall) before pointing a meeting at it.
+
 ## Known limits
 
 - Only `ja<->en`. Adding a language means converting another OPUS-MT-family model

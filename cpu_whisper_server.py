@@ -15,6 +15,8 @@ import logging
 import os
 
 from flask import Flask, request, jsonify
+
+from sidecar_auth import install as install_auth
 from faster_whisper import WhisperModel
 from waitress import serve
 
@@ -29,13 +31,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 log = logging.getLogger('cpu-whisper')
 
 app = Flask(__name__)
+if install_auth(app):
+    log.info('bearer token required (STT_API_KEY is set)')
 
 log.info('loading faster-whisper model=%s cpu_threads=%d ...', MODEL_SIZE, CPU_THREADS)
 model = WhisperModel(MODEL_SIZE, device='cpu', compute_type='int8', cpu_threads=CPU_THREADS)
 #  172.17.0.1 is docker0's host-side address, reachable from every sandbox container on this
 #  host (`bm/docs stt-translation#hostwork`). This has no auth, so anything with container access
 #  on this host can reach it -- accepted tradeoff so the dev sandboxes can reach the fallback ASR.
-LISTEN = f'127.0.0.1:{PORT} 172.17.0.1:{PORT}'
+#  Space-separated host:port list, as waitress takes it. The default serves this host and its
+#  containers only; a sidecar that has to answer another machine needs its own address here --
+#  and `STT_API_KEY` set, since anything that can reach it can read back what was said.
+LISTEN = os.environ.get('CPU_WHISPER_LISTEN', f'127.0.0.1:{PORT} 172.17.0.1:{PORT}')
 log.info('model loaded, listening on %s', LISTEN)
 
 

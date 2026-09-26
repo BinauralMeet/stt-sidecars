@@ -11,6 +11,12 @@ Environment=CPU_WHISPER_MODEL=medium
 Environment=CPU_WHISPER_THREADS=8
 Environment=CPU_WHISPER_PORT=8190
 Environment=HF_HOME=/opt/stt-sidecars/hf-cache
+#  This one answers other machines (the media servers), so it cannot stay on loopback -- and
+#  therefore must not stay unauthenticated either: anything that reaches it can read back what
+#  was said. Put the address this host is reached on here, and the shared key in STT_API_KEY.
+#  Audio travels in the clear over plain HTTP; front it with TLS if it leaves the local network.
+Environment=CPU_WHISPER_LISTEN=127.0.0.1:8190
+#Environment=STT_API_KEY=<shared key>
 Restart=on-failure
 RestartSec=5
 
