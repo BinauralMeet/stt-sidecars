@@ -70,9 +70,13 @@ class Pair:
         if _min_score is None or len(decoded) != 1:
             return [text for text, _score in decoded]
         text, score = decoded[0]
-        if score is not None and score < _min_score:
-            log.info('dropping low-confidence hypothesis (score=%.2f < %.2f): %r',
-                      score, _min_score, text)
+        #  Logged unconditionally (not just on drop) while TRANSLATE_MIN_SCORE is still an
+        #  unmeasured guess (bm workspace CHANGELOG 2026-09-27) -- see gpu_whisper_server.py's
+        #  matching comment. Turn back to logging only the dropped ones once trusted.
+        kept = not (score is not None and score < _min_score)
+        log.info('score=%s kept=%s text=%r', f'{score:.2f}' if score is not None else 'n/a',
+                  kept, text)
+        if not kept:
 
             return None
 

@@ -179,9 +179,15 @@ def _filter_confident(decoded):
     if _min_score is None or len(decoded) != 1:
         return [text for text, _score in decoded]
     text, score = decoded[0]
-    if score is not None and score < _min_score:
-        log.info('translate: dropping low-confidence hypothesis (score=%.2f < %.2f): %r',
-                  score, _min_score, text)
+    #  Logged unconditionally (not just on drop) while MULTI_MIN_SCORE is still an unmeasured
+    #  guess (bm workspace CHANGELOG 2026-09-27): there is no other way to see what real (text,
+    #  score) pairs look like in this deployment, and a threshold picked without seeing the
+    #  passing side too is just as much a guess as -1.2 itself. Turn back to logging only the
+    #  dropped ones once the threshold is trusted -- this is one line per translated utterance.
+    kept = not (score is not None and score < _min_score)
+    log.info('translate: score=%s kept=%s text=%r', f'{score:.2f}' if score is not None else 'n/a',
+             kept, text)
+    if not kept:
 
         return None
 
