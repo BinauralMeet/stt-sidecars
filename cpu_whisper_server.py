@@ -26,6 +26,14 @@ PORT = int(os.environ.get('CPU_WHISPER_PORT', '8190'))
 #  Vocabulary this deployment keeps getting wrong -- handed to the decoder as context so
 #  loanwords and names stand a chance. Same knob as gpu_whisper_server.py; see its docstring.
 PROMPT = os.environ.get('WHISPER_PROMPT', '')
+#  Same signals, same reasoning and same defaults as gpu_whisper_server.py's matching constants
+#  (found live 2026-09-27, bm workspace CHANGELOG same date): avg_logprob alone missed a
+#  repetition-looped hallucination entirely (near-perfect confidence repeating the same token),
+#  so both a confidence floor and faster-whisper's own compression-ratio signal are checked.
+WHISPER_MIN_LOGPROB = os.environ.get('WHISPER_MIN_LOGPROB', '-1.0')
+WHISPER_MAX_COMPRESSION_RATIO = os.environ.get('WHISPER_MAX_COMPRESSION_RATIO', '2.4')
+_asr_min_logprob = float(WHISPER_MIN_LOGPROB) if WHISPER_MIN_LOGPROB else None
+_asr_max_compression = float(WHISPER_MAX_COMPRESSION_RATIO) if WHISPER_MAX_COMPRESSION_RATIO else None
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('cpu-whisper')
@@ -61,8 +69,27 @@ def asr():
             initial_prompt=prompt,
             vad_filter=False,  # BM already did VAD upstream; avoid double-guessing endpoints
         )
-        text = ''.join(seg.text for seg in segments).strip()
+        texts = []
+        weighted_logprob = 0.0
+        duration = 0.0
+        compression_ratio = 0.0
+        for seg in segments:
+            texts.append(seg.text)
+            seg_dur = max(seg.end - seg.start, 1e-6)
+            weighted_logprob += seg.avg_logprob * seg_dur
+            duration += seg_dur
+            compression_ratio = max(compression_ratio, seg.compression_ratio)
+        text = ''.join(texts).strip()
         lang = lang_hint or info.language or ''
+        avg_logprob = weighted_logprob / duration if duration else None
+        low_confidence = (_asr_min_logprob is not None and avg_logprob is not None
+                          and avg_logprob < _asr_min_logprob)
+        repetitive = (_asr_max_compression is not None and compression_ratio > _asr_max_compression)
+        log.info('asr: avg_logprob=%s compression_ratio=%.2f suppressed=%s text=%r',
+                 f'{avg_logprob:.2f}' if avg_logprob is not None else 'n/a',
+                 compression_ratio, low_confidence or repetitive, text)
+        if low_confidence or repetitive:
+            text = ''  # same wire meaning as no speech detected -- see gpu_whisper_server.py
     except Exception as e:  # noqa: BLE001 -- this is the last fallback, must never crash the loop
         log.warning('transcribe failed: %s', e)
         return jsonify(text='', lang=lang_hint or ''), 500

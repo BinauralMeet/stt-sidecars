@@ -43,6 +43,7 @@ import io
 import logging
 import os
 import sys
+import zlib
 
 
 def _add_cuda_dll_dirs():
@@ -87,6 +88,21 @@ PROMPT = os.environ.get('WHISPER_PROMPT', '')
 #  Japanese: "ask not" came back as "アースクリーン". Naming the prompt's own language keeps it
 #  out of the way of every other one; empty means apply it always, as before.
 PROMPT_LANG = os.environ.get('WHISPER_PROMPT_LANG', '')
+#  Found live on 2026-09-27 (bm workspace CHANGELOG same date) testing deliberately garbled/
+#  meaningless speech: avg_logprob alone missed a repetition-looped hallucination entirely
+#  (score -0.07, effectively the model's best possible confidence, for "nya nya nya..." repeated
+#  hundreds of times) -- a compressible, repetitive transcript is confident *because* it is easy
+#  to keep predicting the same thing, not despite it. compression_ratio is faster-whisper's own
+#  signal for exactly this (it already retries at higher temperature internally when a segment
+#  exceeds this on the way to its final answer -- this is a second, coarser check on top, since a
+#  segment can still come back over the line after every retry). 2.4 is faster-whisper's own
+#  library default for the same reason; -1.0 for avg_logprob is a placeholder (`#todo`) still
+#  being tuned against live (text, avg_logprob) pairs. Either check alone is not enough: a short,
+#  genuinely-fine utterance can score similarly to a hallucinated one on avg_logprob alone.
+WHISPER_MIN_LOGPROB = os.environ.get('WHISPER_MIN_LOGPROB', '-1.0')
+WHISPER_MAX_COMPRESSION_RATIO = os.environ.get('WHISPER_MAX_COMPRESSION_RATIO', '2.4')
+_asr_min_logprob = float(WHISPER_MIN_LOGPROB) if WHISPER_MIN_LOGPROB else None
+_asr_max_compression = float(WHISPER_MAX_COMPRESSION_RATIO) if WHISPER_MAX_COMPRESSION_RATIO else None
 #  Several people talk at once in a meeting, and every one of their utterances lands here. One
 #  model instance answers one request at a time, so without replicas the second speaker simply
 #  waits for the first -- which is the latency people actually notice.
@@ -104,6 +120,23 @@ MULTI_TOKENIZER = os.environ.get('MULTI_TOKENIZER', 'facebook/m2m100_418M')
 #  / CHANGELOG 2026-09-27): nobody has logged real (text, score) pairs from this deployment yet to
 #  pick a real cutoff, so this wants tuning against actual meetings before trusting it blindly.
 MULTI_MIN_SCORE = os.environ.get('MULTI_MIN_SCORE', '-1.2')
+#  Found live on 2026-09-27 (same session that found WHISPER_MAX_COMPRESSION_RATIO above): a
+#  translation can loop into repeating a short phrase on its own, independent of whether the
+#  source text was itself repetitive -- e.g. a perfectly ordinary Japanese sentence came back as
+#  "No. No. No. No." Decoder confidence doesn't catch this either (same reason as the ASR case),
+#  so the same compression-ratio trick applies to the *output* text here.
+MULTI_MAX_COMPRESSION_RATIO = os.environ.get('MULTI_MAX_COMPRESSION_RATIO', '2.4')
+_max_compression = float(MULTI_MAX_COMPRESSION_RATIO) if MULTI_MAX_COMPRESSION_RATIO else None
+
+
+def _text_compression_ratio(text):
+    """Same idea as faster-whisper's own compression_ratio: a hypothesis that is mostly one
+    phrase repeated compresses far better than real text does."""
+    data = text.encode('utf-8')
+    if not data:
+        return 1.0
+
+    return len(data) / len(zlib.compress(data, 9))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('gpu-whisper')
@@ -144,8 +177,8 @@ def asr():
         #  translates a hallucinated/repetition-looped transcript just as confidently as a real
         #  one, since by the time it sees the text there is nothing left to be unsure about.
         #  faster-whisper's own per-segment metrics are exactly what it used to decide "this is
-        #  likely silence/nonsense" during decoding, so log them here (not enforced yet) to see
-        #  whether they actually correlate with the bad cases before wiring anything to them.
+        #  likely silence/nonsense" during decoding, so use them here too (see
+        #  WHISPER_MIN_LOGPROB/WHISPER_MAX_COMPRESSION_RATIO above for what was found live).
         texts = []
         weighted_logprob = 0.0
         duration = 0.0
@@ -161,9 +194,18 @@ def asr():
         text = ''.join(texts).strip()
         lang = lang_hint or info.language or ''
         avg_logprob = weighted_logprob / duration if duration else None
-        log.info('asr: avg_logprob=%s no_speech_prob=%.2f compression_ratio=%.2f text=%r',
+        low_confidence = (_asr_min_logprob is not None and avg_logprob is not None
+                          and avg_logprob < _asr_min_logprob)
+        repetitive = (_asr_max_compression is not None and compression_ratio > _asr_max_compression)
+        log.info('asr: avg_logprob=%s no_speech_prob=%.2f compression_ratio=%.2f '
+                 'suppressed=%s text=%r',
                  f'{avg_logprob:.2f}' if avg_logprob is not None else 'n/a',
-                 no_speech_prob, compression_ratio, text)
+                 no_speech_prob, compression_ratio, low_confidence or repetitive, text)
+        if low_confidence or repetitive:
+            #  Same wire meaning as no speech detected: bmMediasoupServer's stt.ts already treats
+            #  an empty text as "nothing to show" (`!res.text` short-circuits before emitting),
+            #  so nothing downstream needs to learn a new case for this.
+            text = ''
     except Exception as e:  # noqa: BLE001 -- a bad request must not take the service down
         log.warning('transcribe failed: %s', e)
         return jsonify(text='', lang=lang_hint or ''), 500
@@ -199,17 +241,20 @@ def _filter_confident(decoded):
     promises (module docstring), so a genuine multi-item batch skips the check rather than risk
     that. Returns the list to send back, or None to omit the dst entirely (same wire meaning as
     "unsupported pair": the caller falls back to the original-language subtitle)."""
-    if _min_score is None or len(decoded) != 1:
+    if (_min_score is None and _max_compression is None) or len(decoded) != 1:
         return [text for text, _score in decoded]
     text, score = decoded[0]
-    #  Logged unconditionally (not just on drop) while MULTI_MIN_SCORE is still an unmeasured
-    #  guess (bm workspace CHANGELOG 2026-09-27): there is no other way to see what real (text,
-    #  score) pairs look like in this deployment, and a threshold picked without seeing the
-    #  passing side too is just as much a guess as -1.2 itself. Turn back to logging only the
-    #  dropped ones once the threshold is trusted -- this is one line per translated utterance.
-    kept = not (score is not None and score < _min_score)
-    log.info('translate: score=%s kept=%s text=%r', f'{score:.2f}' if score is not None else 'n/a',
-             kept, text)
+    low_confidence = score is not None and score < _min_score if _min_score is not None else False
+    ratio = _text_compression_ratio(text)
+    repetitive = _max_compression is not None and ratio > _max_compression
+    #  Logged unconditionally (not just on drop) while these are still unmeasured guesses (bm
+    #  workspace CHANGELOG 2026-09-27): there is no other way to see what real (text, score,
+    #  ratio) triples look like in this deployment, and a threshold picked without seeing the
+    #  passing side too is just as much a guess as the defaults themselves. Turn back to logging
+    #  only the dropped ones once trusted -- this is one line per translated utterance.
+    kept = not (low_confidence or repetitive)
+    log.info('translate: score=%s ratio=%.2f kept=%s text=%r',
+             f'{score:.2f}' if score is not None else 'n/a', ratio, kept, text)
     if not kept:
 
         return None
