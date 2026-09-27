@@ -42,6 +42,7 @@ sentence for a short/garbled/OOD source, and the wire format has no way to mark 
 import io
 import logging
 import os
+import re
 import sys
 import zlib
 
@@ -103,6 +104,30 @@ WHISPER_MIN_LOGPROB = os.environ.get('WHISPER_MIN_LOGPROB', '-1.0')
 WHISPER_MAX_COMPRESSION_RATIO = os.environ.get('WHISPER_MAX_COMPRESSION_RATIO', '2.4')
 _asr_min_logprob = float(WHISPER_MIN_LOGPROB) if WHISPER_MIN_LOGPROB else None
 _asr_max_compression = float(WHISPER_MAX_COMPRESSION_RATIO) if WHISPER_MAX_COMPRESSION_RATIO else None
+#  Found live 2026-09-27, right after the two checks above: on unclear audio the decoder can
+#  latch onto `initial_prompt` itself and read the prompt's own vocabulary back as the
+#  transcript -- "ウィンドウ, シェア, コンテンツ, シェア, コンテンツ, スクリーン", every single
+#  term a literal entry from WHISPER_PROMPT, comma-joined the same way the prompt is written.
+#  Neither avg_logprob (-0.59, unremarkable) nor compression_ratio (1.41, several distinct words)
+#  caught it -- a shuffled/repeated subset of a comma list isn't the same shape as one token
+#  repeated. Detected by the same shape instead: split the transcript on commas/読点 and check how
+#  much of it is literal prompt vocabulary. Real speech mentioning "ウィンドウ" in a sentence
+#  looks nothing like this; a bare list of 2+ terms that are almost all prompt words does.
+WHISPER_PROMPT_LEAK_RATIO = os.environ.get('WHISPER_PROMPT_LEAK_RATIO', '0.7')
+_prompt_leak_ratio = float(WHISPER_PROMPT_LEAK_RATIO) if WHISPER_PROMPT_LEAK_RATIO else None
+
+
+def _is_prompt_leak(text, prompt):
+    if _prompt_leak_ratio is None or not prompt:
+        return False
+    prompt_terms = {t.strip() for t in re.split(r'[,、]', prompt) if t.strip()}
+    if not prompt_terms:
+        return False
+    output_terms = [t.strip() for t in re.split(r'[,、]', text) if t.strip()]
+    if len(output_terms) < 2:
+        return False  # a single word, even a prompt word, is an entirely ordinary thing to say
+
+    return sum(1 for t in output_terms if t in prompt_terms) / len(output_terms) >= _prompt_leak_ratio
 #  Several people talk at once in a meeting, and every one of their utterances lands here. One
 #  model instance answers one request at a time, so without replicas the second speaker simply
 #  waits for the first -- which is the latency people actually notice.
@@ -197,11 +222,12 @@ def asr():
         low_confidence = (_asr_min_logprob is not None and avg_logprob is not None
                           and avg_logprob < _asr_min_logprob)
         repetitive = (_asr_max_compression is not None and compression_ratio > _asr_max_compression)
+        prompt_leak = _is_prompt_leak(text, prompt)
         log.info('asr: avg_logprob=%s no_speech_prob=%.2f compression_ratio=%.2f '
                  'suppressed=%s text=%r',
                  f'{avg_logprob:.2f}' if avg_logprob is not None else 'n/a',
-                 no_speech_prob, compression_ratio, low_confidence or repetitive, text)
-        if low_confidence or repetitive:
+                 no_speech_prob, compression_ratio, low_confidence or repetitive or prompt_leak, text)
+        if low_confidence or repetitive or prompt_leak:
             #  Same wire meaning as no speech detected: bmMediasoupServer's stt.ts already treats
             #  an empty text as "nothing to show" (`!res.text` short-circuits before emitting),
             #  so nothing downstream needs to learn a new case for this.

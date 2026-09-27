@@ -13,6 +13,7 @@ no external network dependency once the model is cached locally.
 import io
 import logging
 import os
+import re
 
 from flask import Flask, request, jsonify
 
@@ -34,6 +35,23 @@ WHISPER_MIN_LOGPROB = os.environ.get('WHISPER_MIN_LOGPROB', '-1.0')
 WHISPER_MAX_COMPRESSION_RATIO = os.environ.get('WHISPER_MAX_COMPRESSION_RATIO', '2.4')
 _asr_min_logprob = float(WHISPER_MIN_LOGPROB) if WHISPER_MIN_LOGPROB else None
 _asr_max_compression = float(WHISPER_MAX_COMPRESSION_RATIO) if WHISPER_MAX_COMPRESSION_RATIO else None
+#  Same signal as gpu_whisper_server.py's matching constant/function (found live 2026-09-27): on
+#  unclear audio the decoder can read initial_prompt's own vocabulary back as the transcript.
+WHISPER_PROMPT_LEAK_RATIO = os.environ.get('WHISPER_PROMPT_LEAK_RATIO', '0.7')
+_prompt_leak_ratio = float(WHISPER_PROMPT_LEAK_RATIO) if WHISPER_PROMPT_LEAK_RATIO else None
+
+
+def _is_prompt_leak(text, prompt):
+    if _prompt_leak_ratio is None or not prompt:
+        return False
+    prompt_terms = {t.strip() for t in re.split(r'[,、]', prompt) if t.strip()}
+    if not prompt_terms:
+        return False
+    output_terms = [t.strip() for t in re.split(r'[,、]', text) if t.strip()]
+    if len(output_terms) < 2:
+        return False
+
+    return sum(1 for t in output_terms if t in prompt_terms) / len(output_terms) >= _prompt_leak_ratio
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('cpu-whisper')
@@ -85,10 +103,11 @@ def asr():
         low_confidence = (_asr_min_logprob is not None and avg_logprob is not None
                           and avg_logprob < _asr_min_logprob)
         repetitive = (_asr_max_compression is not None and compression_ratio > _asr_max_compression)
+        prompt_leak = _is_prompt_leak(text, prompt)
         log.info('asr: avg_logprob=%s compression_ratio=%.2f suppressed=%s text=%r',
                  f'{avg_logprob:.2f}' if avg_logprob is not None else 'n/a',
-                 compression_ratio, low_confidence or repetitive, text)
-        if low_confidence or repetitive:
+                 compression_ratio, low_confidence or repetitive or prompt_leak, text)
+        if low_confidence or repetitive or prompt_leak:
             text = ''  # same wire meaning as no speech detected -- see gpu_whisper_server.py
     except Exception as e:  # noqa: BLE001 -- this is the last fallback, must never crash the loop
         log.warning('transcribe failed: %s', e)
