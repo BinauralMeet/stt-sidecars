@@ -85,6 +85,30 @@ curl -X POST http://<rtx5070ti>:8100/activate/gpuwhisper   # stops hidream, star
 curl http://<rtx5070ti>:8100/status                        # active_modes
 ```
 
+**`activate/gpuwhisper` is a no-op if it is already the active mode** (`control_api.py` only
+starts a mode that is not already `_is_running`) -- it will not pick up a code change on its own.
+To actually restart it: `activate/none` (stops everything) then `activate/gpuwhisper` again.
+Check `/status` first if anything else might be running (`hidream` in particular takes a while
+to unload) so this does not stop an unrelated job.
+
+**That host has no checkout of this repo either** (same situation as ai4, `#ai4`) --
+`server.py` is a hand-copied file at `C:\Home\work\gpuwhisper\server.py`, and as of 2026-09-27
+it is missing the `sidecar_auth` wiring that `gpu_whisper_server.py` in this repo has (nobody
+has copied that piece over there yet, so this instance has no bearer-token check regardless of
+`STT_API_KEY`). Before overwriting it wholesale, diff it against this repo's HEAD -- it is a
+manual copy, not a stale checkout, so it may carry other differences than that one. Updating it:
+
+```sh
+scp gpu_whisper_server.py rtx5070ti:/c/Home/work/gpuwhisper/server.py.new
+ssh rtx5070ti '"C:\Home\work\gpuwhisper\venv\Scripts\python.exe" -m py_compile /c/Home/work/gpuwhisper/server.py.new'
+ssh rtx5070ti 'cp /c/Home/work/gpuwhisper/server.py /c/Home/work/gpuwhisper/server.py.bak-<date> && mv /c/Home/work/gpuwhisper/server.py.new /c/Home/work/gpuwhisper/server.py'
+# then the activate/none -> activate/gpuwhisper cycle above
+```
+
+The host is Windows (git-bash over ssh): `systemctl`/`find`/`wmic` are not there, `ls`/`cp`/`cat`
+work, and a stubborn double-quote-in-double-quote needs `powershell -EncodedCommand` (base64
+UTF-16LE) rather than fighting cmd's quoting.
+
 `control_api.py` passes it `WHISPER_PROMPT` (the katakana vocabulary) with
 `WHISPER_PROMPT_LANG=ja`, and exposes it on the LAN so the reverse proxy can publish it. Three
 things bit us there and are worth knowing before touching another Windows GPU box:
