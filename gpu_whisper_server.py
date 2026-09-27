@@ -139,8 +139,31 @@ def asr():
             beam_size=BEAM,
             condition_on_previous_text=False,  # each utterance stands alone; no drift across them
         )
-        text = ''.join(seg.text for seg in segments).strip()
+        #  Investigating 2026-09-27 (bm workspace CHANGELOG same date): a downstream translation
+        #  confidence score turned out useless for catching a bad *recognition* -- the model
+        #  translates a hallucinated/repetition-looped transcript just as confidently as a real
+        #  one, since by the time it sees the text there is nothing left to be unsure about.
+        #  faster-whisper's own per-segment metrics are exactly what it used to decide "this is
+        #  likely silence/nonsense" during decoding, so log them here (not enforced yet) to see
+        #  whether they actually correlate with the bad cases before wiring anything to them.
+        texts = []
+        weighted_logprob = 0.0
+        duration = 0.0
+        no_speech_prob = 0.0
+        compression_ratio = 0.0
+        for seg in segments:
+            texts.append(seg.text)
+            seg_dur = max(seg.end - seg.start, 1e-6)
+            weighted_logprob += seg.avg_logprob * seg_dur
+            duration += seg_dur
+            no_speech_prob = max(no_speech_prob, seg.no_speech_prob)
+            compression_ratio = max(compression_ratio, seg.compression_ratio)
+        text = ''.join(texts).strip()
         lang = lang_hint or info.language or ''
+        avg_logprob = weighted_logprob / duration if duration else None
+        log.info('asr: avg_logprob=%s no_speech_prob=%.2f compression_ratio=%.2f text=%r',
+                 f'{avg_logprob:.2f}' if avg_logprob is not None else 'n/a',
+                 no_speech_prob, compression_ratio, text)
     except Exception as e:  # noqa: BLE001 -- a bad request must not take the service down
         log.warning('transcribe failed: %s', e)
         return jsonify(text='', lang=lang_hint or ''), 500
