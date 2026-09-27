@@ -8,7 +8,10 @@ Wire contract (see bm/docs stt-translation#hostwork):
 
 A `dst` (or `src`) this sidecar has no model for is simply left out of the response; the caller
 already treats a missing key as "no translation available" and keeps the original-language
-subtitle, so partial coverage degrades gracefully rather than failing the whole request.
+subtitle, so partial coverage degrades gracefully rather than failing the whole request. A
+low-confidence hypothesis (`TRANSLATE_MIN_SCORE`) is left out the same way -- these models
+occasionally decode a fluent-looking but made-up sentence for a short/garbled/OOD source, and the
+wire format has no way to mark "translated" vs "the model gave up" except by omitting the dst.
 
 Models are pre-converted CTranslate2 checkpoints (see README.md `#models` for how to regenerate
 them) -- this process never touches the network at request time.
@@ -26,6 +29,13 @@ from waitress import serve
 MODELS_DIR = os.environ.get('TRANSLATE_MODELS_DIR', '/opt/stt-sidecars/models')
 CPU_THREADS = int(os.environ.get('TRANSLATE_THREADS', '4'))
 PORT = int(os.environ.get('TRANSLATE_PORT', '8191'))
+#  Below this (mean log-prob per output token, always <= 0), a hypothesis is dropped instead of
+#  being returned as if it were a real translation -- same reasoning and same wire-format caveat
+#  (batch size 1 only) as gpu_whisper_server.py's MULTI_MIN_SCORE. -1.2 is an unmeasured
+#  placeholder (bm workspace doc `stt-translation#todo` / CHANGELOG 2026-09-27); tune it against
+#  real (text, score) pairs once some have been logged. Empty string disables the check.
+TRANSLATE_MIN_SCORE = os.environ.get('TRANSLATE_MIN_SCORE', '-1.2')
+_min_score = float(TRANSLATE_MIN_SCORE) if TRANSLATE_MIN_SCORE else None
 
 #  (src, dst) -> model directory name under MODELS_DIR. Add a line here + convert the model
 #  (README.md `#models`) to support another language pair.
@@ -49,11 +59,33 @@ class Pair:
         self.translator = ctranslate2.Translator(
             model_dir, device='cpu', inter_threads=1, intra_threads=CPU_THREADS)
 
-    def translate(self, texts: list[str]) -> list[str]:
+    def translate(self, texts: list[str]) -> list[str]|None:
+        """Returns the decoded hypotheses, or None if the (single) one was below
+        TRANSLATE_MIN_SCORE -- see the module-level comment for why, and why only for a
+        single-text batch."""
         batch = [self.sp_src.encode(t, out_type=str) + ['</s>'] for t in texts]
-        results = self.translator.translate_batch(batch, beam_size=4, max_decoding_length=256)
+        results = self.translator.translate_batch(
+            batch, beam_size=4, max_decoding_length=256, return_scores=True)
+        decoded = [(self.sp_tgt.decode(r.hypotheses[0]), self._mean_score(r)) for r in results]
+        if _min_score is None or len(decoded) != 1:
+            return [text for text, _score in decoded]
+        text, score = decoded[0]
+        if score is not None and score < _min_score:
+            log.info('dropping low-confidence hypothesis (score=%.2f < %.2f): %r',
+                      score, _min_score, text)
 
-        return [self.sp_tgt.decode(r.hypotheses[0]) for r in results]
+            return None
+
+        return [text]
+
+    @staticmethod
+    def _mean_score(result):
+        #  Cumulative log-prob isn't comparable across hypotheses of different length -- divide
+        #  by the token count actually scored.
+        if not result.scores:
+            return None
+
+        return result.scores[0] / max(len(result.hypotheses[0]), 1)
 
 
 pairs: dict[tuple[str, str], Pair] = {}
@@ -84,7 +116,9 @@ def translate():
         if pair is None:
             continue  # unsupported pair -- omitted, not an error (see module docstring)
         try:
-            out[dst] = pair.translate(texts)
+            translated = pair.translate(texts)
+            if translated is not None:
+                out[dst] = translated
         except Exception as e:  # noqa: BLE001 -- one bad pair must not sink the others
             log.warning('translate %s->%s failed: %s', src, dst, e)
 
