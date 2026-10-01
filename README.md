@@ -80,6 +80,12 @@ It does **not** run on this host (no GPU here). It is deployed on `rtx5070ti`, u
 `C:\Home\work\gpuwhisper\` with its own venv, and that machine's `control_api.py` owns it as a
 mode alongside `hidream`/`sensevoice`/`irodori`:
 
+A second, identical copy runs on `rtx5070ti2`: the same `server.py` (copied
+from rtx5070ti, not from this repo), a venv built from rtx5070ti's `pip freeze`, and the same
+converted M2M-100. Its `control_api.py` is a trimmed copy with only the `gpuwhisper` mode (same
+API and lock). bmMediasoupServer load-balances the two as one `pool`
+(bm workspace doc `stt-translation#pool`). When updating `server.py`, update both machines.
+
 ```sh
 curl -X POST http://<rtx5070ti>:8100/activate/gpuwhisper   # stops hidream, starts this
 curl http://<rtx5070ti>:8100/status                        # active_modes
