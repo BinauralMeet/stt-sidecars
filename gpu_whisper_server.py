@@ -359,6 +359,43 @@ def health():
                    translator=MULTI_KIND if translator is not None else None)
 
 
+def warm_up():
+    """Runs one throwaway recognition per model replica, and one translation, before listening.
+
+    The first inference after loading pays for CUDA/cuBLAS initialisation: measured 1.6s right
+    after a mode restart on rtx5070ti2 (24s on the very first start of a fresh install) against
+    0.2s for every request after it. Paying it here means that once this port answers, every
+    request is fast -- the meeting's first utterance included. A failure only costs that speed,
+    so it is logged and serving goes on."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import numpy as np
+
+    t0 = time.time()
+    #  Two seconds of faint noise: enough for the encoder and a few decoder steps to run.
+    audio = (np.random.default_rng(0).standard_normal(16000 * 2) * 0.01).astype(np.float32)
+
+    def one(_):
+        segments, _info = model.transcribe(audio, language='ja', beam_size=BEAM,
+                                           vad_filter=False, condition_on_previous_text=False)
+        list(segments)
+
+    try:
+        #  num_workers replicas each initialise on first use, so warm them side by side.
+        with ThreadPoolExecutor(WORKERS) as pool:
+            list(pool.map(one, range(WORKERS)))
+        if translator is not None:
+            multi_tokenizer.src_lang = 'en'
+            tokens = multi_tokenizer.convert_ids_to_tokens(multi_tokenizer.encode('Warming up.'))
+            translator.translate_batch([tokens], target_prefix=[[_lang_token('ja')]],
+                                       beam_size=4, max_decoding_length=16)
+        log.info('warmed up in %.1fs', time.time() - t0)
+    except Exception as e:  # noqa: BLE001 -- a cold first request is better than no service
+        log.warning('warm-up failed (first requests will be slow): %s', e)
+
+
 if __name__ == '__main__':
+    warm_up()
     #  Enough HTTP threads to keep every model replica fed, plus room for /health.
     serve(app, listen=f'{HOST}:{PORT}', threads=WORKERS + 2)
