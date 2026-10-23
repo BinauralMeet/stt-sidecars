@@ -32,7 +32,10 @@ pairs that one does know.
 
 `MULTI_MODEL`/`MULTI_KIND` choose it. The default is M2M-100 (MIT): NLLB-200 translates better
 but is CC-BY-NC, and this deployment is public, so the licence would follow the whole service
-around. Set MULTI_KIND=nllb if that is acceptable where you are running it.
+around. Set MULTI_KIND=nllb if that is acceptable where you are running it. MULTI_KIND=small100
+is SMaLL-100 (MIT, a 12-encoder/3-decoder distillation of M2M-100 12B): about the same quality
+as M2M-100 418M for zh in Eric's 2026-10-22 comparison, at about half the latency -- see the
+README `#gpu` for converting it.
 
 `MULTI_MIN_SCORE` drops a hypothesis whose mean per-token log-prob falls below it instead of
 returning it as a translation -- these models occasionally decode a fluent-looking but made-up
@@ -134,7 +137,9 @@ def _is_prompt_leak(text, prompt):
 WORKERS = int(os.environ.get('WHISPER_WORKERS', '2'))
 BEAM = int(os.environ.get('WHISPER_BEAM', '5'))
 MULTI_MODEL = os.environ.get('MULTI_MODEL', '')      #  CTranslate2 dir; empty = no /translate
-MULTI_KIND = os.environ.get('MULTI_KIND', 'm2m100')  #  'm2m100' or 'nllb'
+MULTI_KIND = os.environ.get('MULTI_KIND', 'm2m100')  #  'm2m100', 'nllb' or 'small100'
+#  A Hugging Face id or a local directory. The converted SMaLL-100 directory carries its own
+#  tokenizer files (README `#gpu`), so point this at MULTI_MODEL for it.
 MULTI_TOKENIZER = os.environ.get('MULTI_TOKENIZER', 'facebook/m2m100_418M')
 #  Below this (mean log-prob per output token, always <= 0), a hypothesis is dropped instead of
 #  being returned as if it were a real translation -- these seq2seq models occasionally decode a
@@ -249,13 +254,15 @@ NLLB_CODES = {'ja': 'jpn_Jpan', 'en': 'eng_Latn', 'zh': 'zho_Hans', 'ko': 'kor_H
 _min_score = float(MULTI_MIN_SCORE) if MULTI_MIN_SCORE else None
 
 
-def _mean_score(result):
+def _mean_score(result, forced=1):
     """CTranslate2's score is the hypothesis's cumulative log-prob; a longer sentence sums more
     (negative) terms, so raw scores are not comparable across outputs of different length. Divide
-    by the token count actually scored (the forced prefix contributes no informative log-prob)."""
+    by the token count actually scored (the forced prefix contributes no informative log-prob).
+    `forced` is how many of the hypothesis's leading tokens were forced: 1 (the target-language
+    token) for M2M-100/NLLB, 0 for SMaLL-100, which carries the target language on the source side."""
     if not result.scores:
         return None
-    tokens = max(len(result.hypotheses[0]) - 1, 1)  # -1: the forced target-language token
+    tokens = max(len(result.hypotheses[0]) - forced, 1)
 
     return result.scores[0] / tokens
 
@@ -305,6 +312,31 @@ def _lang_token(lang):
     return f'__{lang}__' if lang in NLLB_CODES else None
 
 
+def _encode(texts, src, dst):
+    """Source-side tokens for one (src, dst). M2M-100/NLLB mark the *source* language on the
+    source side ([src_code] X </s>) and force the target language as the first output token.
+    SMaLL-100 is the other way round: the *target* language goes on the source side
+    ([tgt_code] X </s>, its own tokenizer's set_lang_special_tokens) and the decoder starts
+    unforced. Its vocabulary and SentencePiece model are M2M-100's, so the M2M-100 tokenizer
+    produces exactly that when told the target language as its src_lang."""
+    if MULTI_KIND == 'nllb':
+        multi_tokenizer.src_lang = NLLB_CODES[src]
+    elif MULTI_KIND == 'small100':
+        multi_tokenizer.src_lang = dst
+    else:
+        multi_tokenizer.src_lang = src
+
+    return [multi_tokenizer.convert_ids_to_tokens(multi_tokenizer.encode(t)) for t in texts]
+
+
+def _translate_tokens(encoded, dst, **kw):
+    """translate_batch for one dst, and how many forced tokens lead each hypothesis."""
+    if MULTI_KIND == 'small100':
+        return translator.translate_batch(encoded, **kw), 0
+
+    return translator.translate_batch(encoded, target_prefix=[[_lang_token(dst)]] * len(encoded), **kw), 1
+
+
 @app.post('/translate')
 def translate():
     if translator is None:
@@ -315,15 +347,10 @@ def translate():
     dsts = body.get('dsts') or []
     if not isinstance(texts, list) or not texts or not src or not isinstance(dsts, list):
         return jsonify(error='texts, src and dsts are required'), 400
-    src_token = _lang_token(src)
-    if src_token is None:
+    if _lang_token(src) is None:
         return jsonify({}), 200
-
-    if MULTI_KIND == 'nllb':
-        multi_tokenizer.src_lang = src_token
-    else:
-        multi_tokenizer.src_lang = src
-    encoded = [multi_tokenizer.convert_ids_to_tokens(multi_tokenizer.encode(t)) for t in texts]
+    #  M2M-100/NLLB encode the source once for every dst; SMaLL-100 once per dst (see _encode).
+    shared = None if MULTI_KIND == 'small100' else _encode(texts, src, None)
 
     out = {}
     for dst in dsts:
@@ -332,15 +359,15 @@ def translate():
         if token is None or dst == src:
             continue
         try:
-            results = translator.translate_batch(
-                encoded, target_prefix=[[token]] * len(encoded), beam_size=4,
-                max_decoding_length=256, return_scores=True)
-            #  The forced language token is part of the output; drop it before detokenizing.
+            encoded = shared if shared is not None else _encode(texts, src, dst)
+            results, forced = _translate_tokens(encoded, dst, beam_size=4,
+                                                max_decoding_length=256, return_scores=True)
+            #  A forced language token is part of the output; drop it before detokenizing.
             decoded = [
                 (multi_tokenizer.decode(
-                    multi_tokenizer.convert_tokens_to_ids(r.hypotheses[0][1:]),
+                    multi_tokenizer.convert_tokens_to_ids(r.hypotheses[0][forced:]),
                     skip_special_tokens=True),
-                 _mean_score(r))
+                 _mean_score(r, forced))
                 for r in results
             ]
             kept = _filter_confident(decoded)
@@ -386,10 +413,8 @@ def warm_up():
         with ThreadPoolExecutor(WORKERS) as pool:
             list(pool.map(one, range(WORKERS)))
         if translator is not None:
-            multi_tokenizer.src_lang = 'en'
-            tokens = multi_tokenizer.convert_ids_to_tokens(multi_tokenizer.encode('Warming up.'))
-            translator.translate_batch([tokens], target_prefix=[[_lang_token('ja')]],
-                                       beam_size=4, max_decoding_length=16)
+            _translate_tokens(_encode(['Warming up.'], 'en', 'ja'), 'ja',
+                              beam_size=4, max_decoding_length=16)
         log.info('warmed up in %.1fs', time.time() - t0)
     except Exception as e:  # noqa: BLE001 -- a cold first request is better than no service
         log.warning('warm-up failed (first requests will be slow): %s', e)

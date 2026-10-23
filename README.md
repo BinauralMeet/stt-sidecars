@@ -76,6 +76,25 @@ ct2-transformers-converter --model facebook/m2m100_418M --output_dir <dir> --qua
 then point `MULTI_MODEL` at `<dir>`. Torch is only for reading the checkpoint, so the CPU wheel
 is the one to install -- the CUDA build is ten times the download for no benefit.
 
+**SMaLL-100 instead of M2M-100** (`MULTI_KIND=small100`, also MIT): Eric's 2026-10-22 comparison
+(EN/JA/ZH, AI-graded adequacy and chrF++) found it as good as M2M-100 418M for zh, with roughly
+half the latency (EN->ZH p95 314 -> 127 ms) and a little less VRAM; ja<->en is FuguMT's either way.
+It is the M2M-100 architecture and vocabulary, so the same converter works. Copy the tokenizer
+files in and point `MULTI_TOKENIZER` at the same directory, so nothing is fetched at run time:
+
+```sh
+ct2-transformers-converter --model alirezamsh/small100 --output_dir <dir> --quantization float16 \
+  --copy_files sentencepiece.bpe.model vocab.json tokenizer_config.json special_tokens_map.json
+# MULTI_KIND=small100 MULTI_MODEL=<dir> MULTI_TOKENIZER=<dir>
+```
+
+Unlike M2M-100 it carries the *target* language on the source side (`[__zh__] X </s>`) and the
+decoder starts unforced; `_encode` builds that with the M2M-100 tokenizer. Switching back is
+`MULTI_KIND=m2m100` with the old `MULTI_MODEL`/`MULTI_TOKENIZER`. Seen on CPU (2026-10-23, 9
+ja/en/zh/ko sentences through `/translate`): 1.7x faster than M2M-100 418M, comparable wording;
+it once rendered 字幕 as 标题/title where M2M kept 字幕, and once answered ko->zh in traditional
+characters (會議資料).
+
 It does **not** run on this host (no GPU here). It is deployed on `rtx5070ti`, under
 `C:\Home\work\gpuwhisper\` with its own venv, and that machine's `control_api.py` owns it as a
 mode alongside `hidream`/`sensevoice`/`irodori`:
